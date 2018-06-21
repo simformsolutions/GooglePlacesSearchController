@@ -47,6 +47,44 @@ open class Place: NSObject {
     }
 }
 
+open class SearchPlaceDetails: NSObject {
+    
+    open let mainAddress: String
+    open let secondaryAddress: String
+    open let coordinate: CLLocationCoordinate2D
+    open let location : CLLocation
+    
+    override open var description: String {
+        get { return "\(mainAddress), \(secondaryAddress)" }
+    }
+    
+    init(mainAddress: String, secondaryAddress: String,coordinate: CLLocationCoordinate2D,location : CLLocation) {
+        self.mainAddress = mainAddress
+        self.secondaryAddress = secondaryAddress
+        self.coordinate = coordinate
+        self.location = location
+    }
+    
+    convenience init(prediction: [String: Any]) {
+        var featchCoordinate : CLLocationCoordinate2D?
+        if let geometry = prediction["geometry"] as? [String: Any],
+            let location = geometry["location"] as? [String: Any],
+            let latitude = location["lat"] as? CLLocationDegrees,
+            let longitude = location["lng"] as? CLLocationDegrees {
+            featchCoordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+        }
+        
+        self.init(
+            mainAddress: prediction["name"] as? String ?? "",
+            secondaryAddress: prediction["formatted_address"] as? String ?? "",
+            coordinate : featchCoordinate ?? kCLLocationCoordinate2DInvalid,
+            location : CLLocation(latitude: (featchCoordinate?.latitude)!, longitude: (featchCoordinate?.longitude)!)
+        )
+    }
+}
+
+
+
 open class PlaceDetails: CustomStringConvertible {
     open let formattedAddress: String
     open var streetNumber: String? = nil
@@ -97,7 +135,28 @@ open class PlaceDetails: CustomStringConvertible {
     }
 }
 
+
+
 private extension PlaceDetails {
+    
+    enum ComponentType: String {
+        case short = "short_name"
+        case long = "long_name"
+    }
+    
+    /// Parses the element value with the specified type from the array or components.
+    /// Example: `{ "long_name" : "90", "short_name" : "90", "types" : [ "street_number" ] }`
+    ///
+    /// - Parameters:
+    ///   - component: The name of the element.
+    ///   - array: The root component array to search from.
+    ///   - ofType: The type of element to extract the value from.
+    func get(_ component: String, from array: [[String: Any]], ofType: ComponentType) -> String? {
+        return (array.first { ($0["types"] as? [String])?.contains(component) == true })?[ofType.rawValue] as? String
+    }
+}
+
+private extension SearchPlaceDetails {
     
     enum ComponentType: String {
         case short = "short_name"
@@ -118,15 +177,17 @@ private extension PlaceDetails {
 
 open class GooglePlacesSearchController: UISearchController, UISearchBarDelegate {
     
-    convenience public init(delegate: GooglePlacesAutocompleteViewControllerDelegate, apiKey: String, placeType: PlaceType = .all, coordinate: CLLocationCoordinate2D = kCLLocationCoordinate2DInvalid, radius: CLLocationDistance = 0, searchBarPlaceholder: String = "Enter Address") {
+    convenience public init(delegate: GooglePlacesAutocompleteViewControllerDelegate, apiKey: String, placeType: PlaceType = .all, coordinate: CLLocationCoordinate2D = kCLLocationCoordinate2DInvalid, radius: CLLocationDistance = 0, searchBarPlaceholder: String = "Enter Address", location:CLLocation?) {
         assert(!apiKey.isEmpty, "Provide your API key")
+        assert(location != nil, "Provide your current location")
         
         let gpaViewController = GooglePlacesAutocompleteContainer(
             delegate: delegate,
             apiKey: apiKey,
             placeType: placeType,
-            coordinate: coordinate,
-            radius: radius
+            coordinate: (location?.coordinate)!,
+            radius: radius,
+            location: location!
         )
         
         self.init(searchResultsController: gpaViewController)
@@ -139,30 +200,33 @@ open class GooglePlacesSearchController: UISearchController, UISearchBarDelegate
 }
 
 public protocol GooglePlacesAutocompleteViewControllerDelegate: class {
-    func viewController(didAutocompleteWith place: PlaceDetails)
+    func viewController(didAutocompleteWith place: SearchPlaceDetails)
 }
 
 open class GooglePlacesAutocompleteContainer: UITableViewController {
     private weak var delegate: GooglePlacesAutocompleteViewControllerDelegate?
-    
     private var apiKey: String = ""
     private var placeType: PlaceType = .all
     private var coordinate: CLLocationCoordinate2D = kCLLocationCoordinate2DInvalid
     private var radius: Double = 0.0
-    private let cellIdentifier = "Cell"
-    
-    private var places = [Place]() {
+    private let cellIdentifier = String(describing: LocationSearchTableViewCell.self)
+    private var location:CLLocation?
+    private var places = [SearchPlaceDetails]() {
         didSet { tableView.reloadData() }
     }
     
-    
-    convenience init(delegate: GooglePlacesAutocompleteViewControllerDelegate, apiKey: String, placeType: PlaceType = .all, coordinate: CLLocationCoordinate2D, radius: Double) {
+    convenience init(delegate: GooglePlacesAutocompleteViewControllerDelegate, apiKey: String, placeType: PlaceType = .all, coordinate: CLLocationCoordinate2D, radius: Double, location:CLLocation) {
         self.init()
         self.delegate = delegate
         self.apiKey = apiKey
         self.placeType = placeType
         self.coordinate = coordinate
         self.radius = radius
+        self.location = location
+        let bundle = Bundle(for: LocationSearchTableViewCell.self)
+        
+        self.tableView.register(UINib(nibName: String(describing: LocationSearchTableViewCell.self), bundle: bundle), forCellReuseIdentifier:String(describing: LocationSearchTableViewCell.self))
+        self.tableView.separatorStyle = .none
     }
 }
 
@@ -173,26 +237,21 @@ extension GooglePlacesAutocompleteContainer {
     }
     
     override open func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let cell = tableView.dequeueReusableCell(withIdentifier: cellIdentifier)
-            ?? UITableViewCell(style: .subtitle, reuseIdentifier: cellIdentifier)
-        
+        let cell = tableView.dequeueReusableCell(withIdentifier: cellIdentifier) as? LocationSearchTableViewCell
         let place = places[indexPath.row]
-        
-        cell.textLabel?.text = place.mainAddress
-        cell.detailTextLabel?.text = place.secondaryAddress
-        cell.accessoryType = .disclosureIndicator
-        
-        return cell
+        cell?.titleLabel.text = place.mainAddress
+        cell?.subTitleLable.text = place.secondaryAddress
+        cell?.mileLabel.text = self.location?.getMile(location: place.location)
+        return cell!
+    }
+    
+    open override func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
+        return 60
     }
     
     override open func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         let place = places[indexPath.row]
-        
-        GooglePlacesRequestHelpers
-            .getPlaceDetails(id: place.id, apiKey: apiKey) { [unowned self] in
-                guard let value = $0 else { return }
-                self.delegate?.viewController(didAutocompleteWith: value)
-        }
+        self.delegate?.viewController(didAutocompleteWith: place)
     }
 }
 
@@ -201,8 +260,8 @@ extension GooglePlacesAutocompleteContainer: UISearchBarDelegate, UISearchResult
     public func searchBar(_ searchBar: UISearchBar, textDidChange searchText: String) {
         guard !searchText.isEmpty else { places = []; return }
         let parameters = getParameters(for: searchText)
-        
-        GooglePlacesRequestHelpers.getPlaces(with: parameters) {
+
+        GooglePlacesRequestHelpers.getTextSearch(with: parameters) {
             self.places = $0
         }
     }
@@ -211,18 +270,19 @@ extension GooglePlacesAutocompleteContainer: UISearchBarDelegate, UISearchResult
         guard let searchText = searchController.searchBar.text, !searchText.isEmpty else { places = []; return }
         let parameters = getParameters(for: searchText)
         
-        GooglePlacesRequestHelpers.getPlaces(with: parameters) {
+        GooglePlacesRequestHelpers.getTextSearch(with: parameters) {
             self.places = $0
         }
     }
     
     private func getParameters(for text: String) -> [String: String] {
         var params = [
-            "input": text,
-            "types": placeType.rawValue,
-            "key": apiKey
+            "query": text,
+            "key": apiKey,
+            "language": "en"
         ]
-        
+//        "query": text,
+        // "types": placeType.rawValue,
         if CLLocationCoordinate2DIsValid(coordinate) {
             params["location"] = "\(coordinate.latitude),\(coordinate.longitude)"
             
@@ -281,7 +341,9 @@ private class GooglePlacesRequestHelpers {
             // Perform table updates on UI thread
             DispatchQueue.main.async {
                 UIApplication.shared.isNetworkActivityIndicatorVisible = false
-                completion(json)
+                let trimJson = NSMutableDictionary.init(dictionary: json)
+                trimJson.removeObjects(forKeys: ["html_attributions","status","next_page_token"])
+                completion(trimJson)
             }
         })
         
@@ -298,12 +360,38 @@ private class GooglePlacesRequestHelpers {
         }
         )
     }
-    
-    static func getPlaceDetails(id: String, apiKey: String, completion: @escaping (PlaceDetails?) -> Void) {
+    static func getTextSearch(with parameters: [String: String], completion: @escaping ([SearchPlaceDetails]) -> Void) {
+        doRequest(
+            "https://maps.googleapis.com/maps/api/place/textsearch/json",
+            params: parameters,
+            completion: {
+                guard let predictions = $0["results"] as? [[String: Any]] else { return }
+                completion(predictions.map { SearchPlaceDetails(prediction: $0) })
+        }
+        )
+    }
+    static func getPlaceDetails(id: String, apiKey:
+        
+        String, completion: @escaping (PlaceDetails?) -> Void) {
         doRequest(
             "https://maps.googleapis.com/maps/api/place/details/json",
             params: [ "placeid": id, "key": apiKey ],
             completion: { completion(PlaceDetails(json: $0 as? [String: Any] ?? [:])) }
         )
+    }
+}
+
+extension CLLocation {
+    func getMile(location:CLLocation) -> String {
+        
+        return "\((self.distance(from: location)/1609.34).rounded(toPlaces: 1)) m"
+    }
+}
+
+extension Double {
+    /// Rounds the double to decimal places value
+    func rounded(toPlaces places:Int) -> Double {
+        let divisor = pow(10.0, Double(places))
+        return (self * divisor).rounded() / divisor
     }
 }
